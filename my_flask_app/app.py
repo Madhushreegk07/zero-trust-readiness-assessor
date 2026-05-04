@@ -21,7 +21,10 @@ def load_prompt(user_input):
     return template.replace("{input}", user_input)
 
 
-# POST API
+# POST API - Describe
+@app.route('/')
+def home():
+    return "Server is running successfully"
 @app.route("/describe", methods=["POST"])
 def describe():
 
@@ -73,6 +76,31 @@ def describe():
     })
 
 
+# POST API - Recommend
+@app.route('/recommend', methods=['GET','POST'])
+def recommend():
+    print("RECOMMEND API CALLED") 
+    data = request.get_json(silent=True)
+
+    recommendations = [
+        {
+            "action_type": "Enable MFA",
+            "description": "Enable multi-factor authentication for all users",
+            "priority": "High"
+        },
+        {
+            "action_type": "Update Software",
+            "description": "Ensure all systems are updated with latest security patches",
+            "priority": "Medium"
+        },
+        {
+            "action_type": "Access Control",
+            "description": "Implement role-based access control (RBAC)",
+            "priority": "High"
+        }
+    ]
+
+    return jsonify(recommendations)
 # Run app
 if __name__ == "__main__":
     app.run(debug=True)
