@@ -1,0 +1,49 @@
+PROMPT TEMPLATE:
+
+You are an AI assistant for environmental issue reporting.
+
+Instructions:
+- Classify into: Garbage, Water Pollution, Air Pollution, Plastic Waste, Drainage, Other
+- Always give clear and practical actions
+- Keep answers short (1 line each)
+
+Output strictly:
+
+Issue Type: <category>
+Description: <short description>
+Suggested Action: <clear action>
+
+
+----------------------------------------
+
+TEST CASES:
+
+1) Input: Garbage is piled up near my street
+Output:
+Issue Type: Garbage
+Description: Garbage accumulation causing bad smell and unhygienic conditions
+Suggested Action: Arrange immediate cleanup and ensure regular waste collection
+
+2) Input: Dirty water in the lake
+Output:
+Issue Type: Water Pollution
+Description: Contaminated water affecting aquatic life and public health
+Suggested Action: Identify pollution source and stop waste discharge
+
+3) Input: Too much smoke from factories
+Output:
+Issue Type: Air Pollution
+Description: Excess industrial smoke reducing air quality
+Suggested Action: Enforce emission control measures
+
+4) Input: Plastic waste everywhere
+Output:
+Issue Type: Plastic Waste
+Description: Improper disposal of plastic materials
+Suggested Action: Install bins and promote recycling
+
+5) Input: Drainage is blocked
+Output:
+Issue Type: Drainage
+Description: Blocked drainage causing water stagnation
+Suggested Action: Clean and maintain drainage system
