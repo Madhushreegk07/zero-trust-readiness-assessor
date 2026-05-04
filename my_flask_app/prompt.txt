@@ -1,0 +1,3 @@
+Explain the following input in a simple way:
+
+Input: {input}
