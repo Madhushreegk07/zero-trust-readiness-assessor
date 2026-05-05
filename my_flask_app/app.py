@@ -15,14 +15,14 @@ app = Flask(__name__)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 
 
-# Function to load prompt
+# Load prompt from file
 def load_prompt(user_input):
     with open("prompt.txt", "r") as f:
         template = f.read()
     return template.replace("{input}", user_input)
 
 
-# 🔹 Async AI function (runs in background)
+# 🔹 Async AI function (Day 5)
 def generate_ai_result_async(user_input):
     try:
         prompt = load_prompt(user_input)
@@ -61,19 +61,18 @@ def home():
     return "Server is running successfully"
 
 
-# 🔹 POST API - Describe (Day 5 updated)
+# 🔹 Day 5 API: /describe (Async AI)
 @app.route("/describe", methods=["POST"])
 def describe():
 
     data = request.get_json()
 
-    # Validate input
     if not data or "input" not in data:
         return jsonify({"error": "Missing 'input' field"}), 400
 
     user_input = data["input"]
 
-    # Run AI in background
+    # Run AI in background thread
     thread = threading.Thread(target=generate_ai_result_async, args=(user_input,))
     thread.start()
 
@@ -84,9 +83,10 @@ def describe():
     })
 
 
-# POST API - Recommend
+# 🔹 Recommend API
 @app.route('/recommend', methods=['GET', 'POST'])
 def recommend():
+
     print("RECOMMEND API CALLED")
 
     recommendations = [
@@ -108,6 +108,38 @@ def recommend():
     ]
 
     return jsonify(recommendations)
+
+
+# 🔹 Day 6 API: /generate-report
+@app.route('/generate-report', methods=['POST'])
+def generate_report():
+
+    data = request.get_json()
+
+    if not data or "input" not in data:
+        return jsonify({"error": "Missing 'input' field"}), 400
+
+    user_input = data["input"]
+
+    report = {
+        "title": "System Analysis Report",
+        "summary": f"Report generated for: {user_input}",
+        "overview": "This report provides a structured analysis of the input received from the user.",
+        "key_items": [
+            "Input received successfully",
+            "Data validated",
+            "Report structure generated",
+            "Processing completed"
+        ],
+        "recommendations": [
+            "Improve input validation",
+            "Enhance logging system",
+            "Monitor system performance continuously"
+        ],
+        "generated_at": datetime.utcnow().isoformat()
+    }
+
+    return jsonify(report), 200
 
 
 # Run app
