@@ -1,147 +1,171 @@
 from flask import Flask, request, jsonify
 import requests
 import os
-from datetime import datetime
 from dotenv import load_dotenv
-import threading
+import time
+import redis
+import hashlib
+import json
 
-# Load .env file
+# Load environment variables
 load_dotenv(override=True)
-print("API KEY LOADED:", os.getenv("GROQ_API_KEY"))
 
 app = Flask(__name__)
 
-# Get API key
+# =========================
+# API KEY
+# =========================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY is missing in .env file")
 
-# Load prompt from file
-def load_prompt(user_input):
-    with open("prompt.txt", "r") as f:
-        template = f.read()
-    return template.replace("{input}", user_input)
+# =========================
+# REDIS CACHE SETUP
+# =========================
+try:
+    redis_client = redis.Redis(host='localhost', port=6379, db=0)
+    redis_client.ping()
+    CACHE_ENABLED = True
+except:
+    print("Redis not available. Running without cache.")
+    redis_client = None
+    CACHE_ENABLED = False
 
+CACHE_TTL = 900  # 15 minutes
 
-# 🔹 Async AI function (Day 5)
-def generate_ai_result_async(user_input):
-    try:
-        prompt = load_prompt(user_input)
+# =========================
+# METRICS
+# =========================
+start_time = time.time()
+request_times = []
 
-        url = "https://api.groq.com/openai/v1/chat/completions"
+@app.before_request
+def before_request():
+    request.start_time = time.time()
 
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
+@app.after_request
+def after_request(response):
+    elapsed = time.time() - request.start_time
+    request_times.append(elapsed)
 
-        payload = {
-            "model": "llama-3.1-8b-instant",
-            "messages": [
-                {"role": "user", "content": prompt}
-            ]
-        }
+    # keep only last 100 requests (avoid memory leak)
+    if len(request_times) > 100:
+        request_times.pop(0)
 
-        response = requests.post(url, json=payload, headers=headers)
-        result = response.json()
+    return response
 
-        try:
-            output = result["choices"][0]["message"]["content"]
-        except:
-            output = "AI failed"
+# =========================
+# HEALTH CHECK
+# =========================
+@app.route('/health', methods=['GET'])
+def health():
+    uptime = time.time() - start_time
 
-        print("AI RESULT:", output)
-
-    except Exception as e:
-        print("ERROR:", str(e))
-
-
-# Home route
-@app.route('/')
-def home():
-    return "Server is running successfully"
-
-
-# 🔹 Day 5 API: /describe (Async AI)
-@app.route("/describe", methods=["POST"])
-def describe():
-
-    data = request.get_json()
-
-    if not data or "input" not in data:
-        return jsonify({"error": "Missing 'input' field"}), 400
-
-    user_input = data["input"]
-
-    # Run AI in background thread
-    thread = threading.Thread(target=generate_ai_result_async, args=(user_input,))
-    thread.start()
+    avg_response = (
+        sum(request_times) / len(request_times)
+        if request_times else 0
+    )
 
     return jsonify({
-        "message": "Request received, AI processing in background",
-        "input": user_input,
-        "time": datetime.utcnow().isoformat()
+        "status": "ok",
+        "model": "zero-trust-ai-v1",
+        "uptime_seconds": round(uptime, 2),
+        "avg_response_time_sec": round(avg_response, 4),
+        "total_requests_tracked": len(request_times),
+        "cache_enabled": CACHE_ENABLED
     })
 
+# =========================
+# ROOT ROUTE
+# =========================
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({
+        "message": "Zero Trust API is running"
+    })
 
-# 🔹 Recommend API
-@app.route('/recommend', methods=['GET', 'POST'])
+# =========================
+# CACHE KEY FUNCTION
+# =========================
+def make_cache_key(data: dict):
+    key_string = json.dumps(data, sort_keys=True)
+    return hashlib.sha256(key_string.encode()).hexdigest()
+
+# =========================
+# MAIN AI ROUTE
+# =========================
+@app.route('/recommend', methods=['POST'])
 def recommend():
+    data = request.get_json(silent=True) or {}
 
-    print("RECOMMEND API CALLED")
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid input"}), 400
 
-    recommendations = [
-        {
-            "action_type": "Enable MFA",
-            "description": "Enable multi-factor authentication for all users",
-            "priority": "High"
-        },
-        {
-            "action_type": "Update Software",
-            "description": "Ensure all systems are updated with latest security patches",
-            "priority": "Medium"
-        },
-        {
-            "action_type": "Access Control",
-            "description": "Implement role-based access control (RBAC)",
-            "priority": "High"
-        }
-    ]
+    cache_key = make_cache_key(data)
 
-    return jsonify(recommendations)
+    # CHECK CACHE
+    if CACHE_ENABLED:
+        cached = redis_client.get(cache_key)
+        if cached:
+            return jsonify({
+                "result": json.loads(cached),
+                "cached": True
+            })
 
+    user_input = data.get("input", "")
 
-# 🔹 Day 6 API: /generate-report
-@app.route('/generate-report', methods=['POST'])
-def generate_report():
+    url = "https://api.groq.com/openai/v1/chat/completions"
 
-    data = request.get_json()
-
-    if not data or "input" not in data:
-        return jsonify({"error": "Missing 'input' field"}), 400
-
-    user_input = data["input"]
-
-    report = {
-        "title": "System Analysis Report",
-        "summary": f"Report generated for: {user_input}",
-        "overview": "This report provides a structured analysis of the input received from the user.",
-        "key_items": [
-            "Input received successfully",
-            "Data validated",
-            "Report structure generated",
-            "Processing completed"
-        ],
-        "recommendations": [
-            "Improve input validation",
-            "Enhance logging system",
-            "Monitor system performance continuously"
-        ],
-        "generated_at": datetime.utcnow().isoformat()
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
     }
 
-    return jsonify(report), 200
+    payload = {
+        "model": "llama3-70b-8192",
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a Zero Trust security expert."
+            },
+            {
+                "role": "user",
+                "content": user_input
+            }
+        ]
+    }
 
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        response_json = response.json()
+    except Exception as e:
+        return jsonify({
+            "error": "API request failed",
+            "details": str(e)
+        }), 500
 
-# Run app
-if __name__ == "__main__":
+    # SAFE RESPONSE PARSING
+    if "choices" in response_json:
+        ai_message = response_json["choices"][0]["message"]["content"]
+    else:
+        ai_message = str(response_json)
+
+    result = {
+        "message": ai_message
+    }
+
+    # STORE IN CACHE
+    if CACHE_ENABLED:
+        redis_client.setex(cache_key, CACHE_TTL, json.dumps(result))
+
+    return jsonify({
+        "result": result,
+        "cached": False
+    })
+
+# =========================
+# RUN SERVER
+# =========================
+if __name__ == '__main__':
     app.run(debug=True)
