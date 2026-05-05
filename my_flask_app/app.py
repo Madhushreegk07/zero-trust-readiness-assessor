@@ -60,7 +60,6 @@ def apply_security_and_metrics(response):
     response.headers["X-XSS-Protection"] = "0"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
-    # ✅ FINAL FIXED CSP (NO MORE MEDIUM ALERT)
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
         "script-src 'self'; "
@@ -90,7 +89,7 @@ def apply_security_and_metrics(response):
     return response
 
 # =========================
-# ROBOTS.TXT FIX (IMPORTANT)
+# ROBOTS.TXT FIX
 # =========================
 @app.route('/robots.txt')
 def robots():
@@ -157,7 +156,8 @@ def recommend():
         if cached:
             return jsonify({
                 "result": json.loads(cached),
-                "cached": True
+                "cached": True,
+                "is_fallback": False
             })
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -170,15 +170,13 @@ def recommend():
     payload = {
         "model": "llama-3.1-8b-instant",
         "messages": [
-            {
-                "role": "system",
-                "content": "You are a Zero Trust security expert."
-            },
-            {
-                "role": "user",
-                "content": user_input
-            }
+            {"role": "system", "content": "You are a Zero Trust security expert."},
+            {"role": "user", "content": user_input}
         ]
+    }
+
+    fallback_response = {
+        "message": "AI service temporarily unavailable. Showing default recommendation."
     }
 
     try:
@@ -187,20 +185,23 @@ def recommend():
         try:
             response_json = response.json()
         except:
-            return jsonify({"error": "Invalid AI response"}), 500
+            return jsonify({
+                "result": fallback_response,
+                "is_fallback": True
+            })
 
-    except Exception as e:
+    except Exception:
         return jsonify({
-            "error": "API request failed",
-            "details": str(e)
-        }), 500
+            "result": fallback_response,
+            "is_fallback": True
+        })
 
     # -------- HANDLE API ERROR --------
     if "error" in response_json:
         return jsonify({
-            "error": "AI service failed",
-            "details": response_json
-        }), 500
+            "result": fallback_response,
+            "is_fallback": True
+        })
 
     # -------- SAFE PARSING --------
     if "choices" in response_json:
@@ -213,12 +214,13 @@ def recommend():
     }
 
     # -------- CACHE STORE --------
-    if CACHE_ENABLED and "message" in result:
+    if CACHE_ENABLED:
         redis_client.setex(cache_key, CACHE_TTL, json.dumps(result))
 
     return jsonify({
         "result": result,
-        "cached": False
+        "cached": False,
+        "is_fallback": False
     })
 
 # =========================
