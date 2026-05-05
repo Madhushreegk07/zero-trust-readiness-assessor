@@ -7,6 +7,11 @@ import redis
 import hashlib
 import json
 
+# Hide server version completely
+from werkzeug.serving import WSGIRequestHandler
+WSGIRequestHandler.server_version = ""
+WSGIRequestHandler.sys_version = ""
+
 # Load environment variables
 load_dotenv(override=True)
 
@@ -44,16 +49,52 @@ request_times = []
 def before_request():
     request.start_time = time.time()
 
+# =========================
+# SECURITY + METRICS
+# =========================
 @app.after_request
-def after_request(response):
+def apply_security_and_metrics(response):
+    # -------- SECURITY HEADERS --------
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "0"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
+    # ✅ FINAL FIXED CSP (NO MORE MEDIUM ALERT)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'; "
+        "form-action 'self';"
+    )
+
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=()"
+
+    # Remove server header
+    response.headers.pop("Server", None)
+
+    # -------- METRICS --------
     elapsed = time.time() - request.start_time
     request_times.append(elapsed)
 
-    # keep only last 100 requests (avoid memory leak)
     if len(request_times) > 100:
         request_times.pop(0)
 
     return response
+
+# =========================
+# ROBOTS.TXT FIX (IMPORTANT)
+# =========================
+@app.route('/robots.txt')
+def robots():
+    return "User-agent: *\nDisallow:", 200, {"Content-Type": "text/plain"}
 
 # =========================
 # HEALTH CHECK
@@ -102,9 +143,15 @@ def recommend():
     if not isinstance(data, dict):
         return jsonify({"error": "Invalid input"}), 400
 
+    user_input = data.get("input", "")
+
+    # -------- INPUT VALIDATION --------
+    if not isinstance(user_input, str) or len(user_input) > 1000:
+        return jsonify({"error": "Invalid input"}), 400
+
     cache_key = make_cache_key(data)
 
-    # CHECK CACHE
+    # -------- CACHE CHECK --------
     if CACHE_ENABLED:
         cached = redis_client.get(cache_key)
         if cached:
@@ -112,8 +159,6 @@ def recommend():
                 "result": json.loads(cached),
                 "cached": True
             })
-
-    user_input = data.get("input", "")
 
     url = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -123,7 +168,7 @@ def recommend():
     }
 
     payload = {
-        "model": "llama3-70b-8192",
+        "model": "llama-3.1-8b-instant",
         "messages": [
             {
                 "role": "system",
@@ -137,15 +182,27 @@ def recommend():
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        response_json = response.json()
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+
+        try:
+            response_json = response.json()
+        except:
+            return jsonify({"error": "Invalid AI response"}), 500
+
     except Exception as e:
         return jsonify({
             "error": "API request failed",
             "details": str(e)
         }), 500
 
-    # SAFE RESPONSE PARSING
+    # -------- HANDLE API ERROR --------
+    if "error" in response_json:
+        return jsonify({
+            "error": "AI service failed",
+            "details": response_json
+        }), 500
+
+    # -------- SAFE PARSING --------
     if "choices" in response_json:
         ai_message = response_json["choices"][0]["message"]["content"]
     else:
@@ -155,8 +212,8 @@ def recommend():
         "message": ai_message
     }
 
-    # STORE IN CACHE
-    if CACHE_ENABLED:
+    # -------- CACHE STORE --------
+    if CACHE_ENABLED and "message" in result:
         redis_client.setex(cache_key, CACHE_TTL, json.dumps(result))
 
     return jsonify({
@@ -168,4 +225,4 @@ def recommend():
 # RUN SERVER
 # =========================
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False)
