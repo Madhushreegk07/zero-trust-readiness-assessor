@@ -6,8 +6,6 @@ import time
 import redis
 import hashlib
 import json
-
-from sentence_transformers import SentenceTransformer
 import chromadb
 
 from werkzeug.serving import WSGIRequestHandler
@@ -20,12 +18,7 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
 
 # =========================
-# LOAD MODEL
-# =========================
-model = SentenceTransformer("all-MiniLM-L6-v2")
-
-# =========================
-# CHROMADB SETUP
+# CHROMADB SETUP (NO ML)
 # =========================
 chroma_client = chromadb.Client()
 collection = chroma_client.create_collection(name="security_knowledge")
@@ -44,17 +37,14 @@ documents = [
 ]
 
 for i, doc in enumerate(documents):
-    embedding = model.encode(doc).tolist()
     collection.add(
         ids=[str(i)],
-        embeddings=[embedding],
         documents=[doc]
     )
 
 def get_context(query):
-    query_embedding = model.encode(query).tolist()
     results = collection.query(
-        query_embeddings=[query_embedding],
+        query_texts=[query],
         n_results=2
     )
     return " ".join(results["documents"][0])
@@ -165,7 +155,7 @@ def recommend():
                 "cached": True
             })
 
-    # RAG
+    # Simple context (no ML)
     context = get_context(user_input)
 
     final_prompt = f"""
@@ -186,11 +176,6 @@ Format:
     "short point 3"
   ]
 }}
-
-Rules:
-- No explanation
-- No extra text
-- Only JSON
 """
 
     url = "https://api.groq.com/openai/v1/chat/completions"
@@ -216,31 +201,12 @@ Rules:
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
         response_json = response.json()
-
         ai_text = response_json["choices"][0]["message"]["content"]
 
-        # Try JSON extraction
         try:
-            start = ai_text.find("{")
-            end = ai_text.rfind("}") + 1
-            json_part = ai_text[start:end]
-            parsed = json.loads(json_part)
+            parsed = json.loads(ai_text)
         except:
-            # Force structured output
-            parsed = {
-                "risk_level": "High",
-                "recommendations": []
-            }
-
-            lines = ai_text.split("\n")
-            for line in lines:
-                if "-" in line or "*" in line or "•" in line:
-                    clean = line.replace("-", "").replace("*", "").strip()
-                    if len(clean) > 5:
-                        parsed["recommendations"].append(clean)
-
-            if len(parsed["recommendations"]) == 0:
-                parsed["recommendations"] = ["Enable MFA", "Use strong passwords"]
+            parsed = fallback
 
         ai_message = parsed
 
