@@ -7,50 +7,77 @@ import redis
 import hashlib
 import json
 
-# ✅ NEW: Sentence Transformer
 from sentence_transformers import SentenceTransformer
+import chromadb
 
-# Hide server version completely
 from werkzeug.serving import WSGIRequestHandler
 WSGIRequestHandler.server_version = ""
 WSGIRequestHandler.sys_version = ""
 
-# Load environment variables
 load_dotenv(override=True)
 
 app = Flask(__name__)
-
-# ✅ OPTIONAL SECURITY: Limit request size (1MB)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
 
 # =========================
-# LOAD MODEL AT STARTUP
+# LOAD MODEL
 # =========================
-print("Loading SentenceTransformer model...")
 model = SentenceTransformer("all-MiniLM-L6-v2")
-print("Model loaded successfully!")
+
+# =========================
+# CHROMADB SETUP
+# =========================
+chroma_client = chromadb.Client()
+collection = chroma_client.create_collection(name="security_knowledge")
+
+documents = [
+    "Zero Trust means never trust, always verify.",
+    "Multi-factor authentication improves login security.",
+    "Regular patching prevents vulnerabilities.",
+    "Use HTTPS to encrypt communication.",
+    "Firewalls block unauthorized access.",
+    "Least privilege reduces attack surface.",
+    "Monitor logs for suspicious activity.",
+    "Endpoint protection prevents malware.",
+    "Strong passwords reduce hacking risk.",
+    "Network segmentation improves security."
+]
+
+for i, doc in enumerate(documents):
+    embedding = model.encode(doc).tolist()
+    collection.add(
+        ids=[str(i)],
+        embeddings=[embedding],
+        documents=[doc]
+    )
+
+def get_context(query):
+    query_embedding = model.encode(query).tolist()
+    results = collection.query(
+        query_embeddings=[query_embedding],
+        n_results=2
+    )
+    return " ".join(results["documents"][0])
 
 # =========================
 # API KEY
 # =========================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-
 if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY is missing in .env file")
+    raise ValueError("GROQ_API_KEY missing in .env")
 
 # =========================
-# REDIS CACHE SETUP
+# REDIS CACHE
 # =========================
 try:
     redis_client = redis.Redis(host='localhost', port=6379, db=0)
     redis_client.ping()
     CACHE_ENABLED = True
 except:
-    print("Redis not available. Running without cache.")
     redis_client = None
     CACHE_ENABLED = False
 
-CACHE_TTL = 900  # 15 minutes
+CACHE_TTL = 900
 
 # =========================
 # METRICS
@@ -62,119 +89,109 @@ request_times = []
 def before_request():
     request.start_time = time.time()
 
-# =========================
-# SECURITY + METRICS
-# =========================
 @app.after_request
-def apply_security_and_metrics(response):
-    # -------- SECURITY HEADERS --------
+def after_request(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; "
-        "script-src 'self'; "
-        "style-src 'self'; "
-        "img-src 'self' data:; "
-        "connect-src 'self'; "
-        "font-src 'self'; "
-        "object-src 'none'; "
-        "base-uri 'self'; "
-        "frame-ancestors 'none'; "
-        "form-action 'self';"
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+        "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self';"
     )
 
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "geolocation=(), microphone=()"
-
-    # Remove server header
     response.headers.pop("Server", None)
 
-    # -------- METRICS --------
     elapsed = time.time() - request.start_time
     request_times.append(elapsed)
-
     if len(request_times) > 100:
         request_times.pop(0)
 
     return response
 
 # =========================
-# ROBOTS.TXT
+# ROUTES
 # =========================
+@app.route('/')
+def home():
+    return jsonify({"message": "Zero Trust API running"})
+
+@app.route('/health')
+def health():
+    uptime = time.time() - start_time
+    avg_response = sum(request_times)/len(request_times) if request_times else 0
+
+    return jsonify({
+        "status": "ok",
+        "uptime": round(uptime, 2),
+        "avg_response_time": round(avg_response, 4),
+        "requests_tracked": len(request_times),
+        "cache_enabled": CACHE_ENABLED
+    })
+
 @app.route('/robots.txt')
 def robots():
     return "User-agent: *\nDisallow:", 200, {"Content-Type": "text/plain"}
 
 # =========================
-# HEALTH CHECK
+# CACHE KEY
 # =========================
-@app.route('/health', methods=['GET'])
-def health():
-    uptime = time.time() - start_time
-
-    avg_response = (
-        sum(request_times) / len(request_times)
-        if request_times else 0
-    )
-
-    return jsonify({
-        "status": "ok",
-        "model": "zero-trust-ai-v1",
-        "uptime_seconds": round(uptime, 2),
-        "avg_response_time_sec": round(avg_response, 4),
-        "total_requests_tracked": len(request_times),
-        "cache_enabled": CACHE_ENABLED
-    })
+def make_cache_key(data):
+    versioned = {"v": "2", "data": data}
+    return hashlib.sha256(json.dumps(versioned, sort_keys=True).encode()).hexdigest()
 
 # =========================
-# ROOT ROUTE
-# =========================
-@app.route('/', methods=['GET'])
-def home():
-    return jsonify({
-        "message": "Zero Trust API is running"
-    })
-
-# =========================
-# CACHE KEY FUNCTION
-# =========================
-def make_cache_key(data: dict):
-    key_string = json.dumps(data, sort_keys=True)
-    return hashlib.sha256(key_string.encode()).hexdigest()
-
-# =========================
-# MAIN AI ROUTE
+# MAIN API
 # =========================
 @app.route('/recommend', methods=['POST'])
 def recommend():
     data = request.get_json(silent=True) or {}
-
-    if not isinstance(data, dict):
-        return jsonify({"error": "Invalid input"}), 400
-
     user_input = data.get("input", "")
 
-    # -------- INPUT VALIDATION --------
     if not isinstance(user_input, str) or len(user_input) > 1000:
         return jsonify({"error": "Invalid input"}), 400
 
-    # ✅ NEW: Generate embedding
-    embedding = model.encode(user_input).tolist()
-
     cache_key = make_cache_key(data)
 
-    # -------- CACHE CHECK --------
     if CACHE_ENABLED:
         cached = redis_client.get(cache_key)
         if cached:
             return jsonify({
                 "result": json.loads(cached),
-                "cached": True,
-                "is_fallback": False
+                "cached": True
             })
+
+    # RAG
+    context = get_context(user_input)
+
+    final_prompt = f"""
+Context:
+{context}
+
+User Input:
+{user_input}
+
+You MUST respond ONLY in valid JSON.
+
+Format:
+{{
+  "risk_level": "Low/Medium/High",
+  "recommendations": [
+    "short point 1",
+    "short point 2",
+    "short point 3"
+  ]
+}}
+
+Rules:
+- No explanation
+- No extra text
+- Only JSON
+"""
 
     url = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -187,60 +204,64 @@ def recommend():
         "model": "llama-3.1-8b-instant",
         "messages": [
             {"role": "system", "content": "You are a Zero Trust security expert."},
-            {"role": "user", "content": user_input}
+            {"role": "user", "content": final_prompt}
         ]
     }
 
-    fallback_response = {
-        "message": "AI service temporarily unavailable. Showing default recommendation."
+    fallback = {
+        "risk_level": "Medium",
+        "recommendations": ["Enable basic security controls"]
     }
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response_json = response.json()
 
+        ai_text = response_json["choices"][0]["message"]["content"]
+
+        # Try JSON extraction
         try:
-            response_json = response.json()
+            start = ai_text.find("{")
+            end = ai_text.rfind("}") + 1
+            json_part = ai_text[start:end]
+            parsed = json.loads(json_part)
         except:
-            return jsonify({
-                "result": fallback_response,
-                "is_fallback": True
-            })
+            # Force structured output
+            parsed = {
+                "risk_level": "High",
+                "recommendations": []
+            }
 
-    except Exception:
-        return jsonify({
-            "result": fallback_response,
-            "is_fallback": True
-        })
+            lines = ai_text.split("\n")
+            for line in lines:
+                if "-" in line or "*" in line or "•" in line:
+                    clean = line.replace("-", "").replace("*", "").strip()
+                    if len(clean) > 5:
+                        parsed["recommendations"].append(clean)
 
-    # -------- HANDLE API ERROR --------
-    if "error" in response_json:
-        return jsonify({
-            "result": fallback_response,
-            "is_fallback": True
-        })
+            if len(parsed["recommendations"]) == 0:
+                parsed["recommendations"] = ["Enable MFA", "Use strong passwords"]
 
-    # -------- SAFE PARSING --------
-    if "choices" in response_json:
-        ai_message = response_json["choices"][0]["message"]["content"]
-    else:
-        ai_message = str(response_json)
+        ai_message = parsed
+
+    except:
+        ai_message = fallback
 
     result = {
-        "message": ai_message
+        "context_used": context,
+        "output": ai_message
     }
 
-    # -------- CACHE STORE --------
     if CACHE_ENABLED:
         redis_client.setex(cache_key, CACHE_TTL, json.dumps(result))
 
     return jsonify({
         "result": result,
-        "cached": False,
-        "is_fallback": False
+        "cached": False
     })
 
 # =========================
-# RUN SERVER
+# RUN
 # =========================
 if __name__ == '__main__':
     app.run(debug=False)
