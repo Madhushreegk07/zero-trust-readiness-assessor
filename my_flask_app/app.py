@@ -7,6 +7,9 @@ import redis
 import hashlib
 import json
 
+# ✅ NEW: Sentence Transformer
+from sentence_transformers import SentenceTransformer
+
 # Hide server version completely
 from werkzeug.serving import WSGIRequestHandler
 WSGIRequestHandler.server_version = ""
@@ -16,6 +19,16 @@ WSGIRequestHandler.sys_version = ""
 load_dotenv(override=True)
 
 app = Flask(__name__)
+
+# ✅ OPTIONAL SECURITY: Limit request size (1MB)
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
+
+# =========================
+# LOAD MODEL AT STARTUP
+# =========================
+print("Loading SentenceTransformer model...")
+model = SentenceTransformer("all-MiniLM-L6-v2")
+print("Model loaded successfully!")
 
 # =========================
 # API KEY
@@ -57,7 +70,7 @@ def apply_security_and_metrics(response):
     # -------- SECURITY HEADERS --------
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "0"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
 
     response.headers["Content-Security-Policy"] = (
@@ -89,7 +102,7 @@ def apply_security_and_metrics(response):
     return response
 
 # =========================
-# ROBOTS.TXT FIX
+# ROBOTS.TXT
 # =========================
 @app.route('/robots.txt')
 def robots():
@@ -147,6 +160,9 @@ def recommend():
     # -------- INPUT VALIDATION --------
     if not isinstance(user_input, str) or len(user_input) > 1000:
         return jsonify({"error": "Invalid input"}), 400
+
+    # ✅ NEW: Generate embedding
+    embedding = model.encode(user_input).tolist()
 
     cache_key = make_cache_key(data)
 
