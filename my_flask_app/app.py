@@ -9,6 +9,7 @@ import json
 import chromadb
 
 from werkzeug.serving import WSGIRequestHandler
+
 WSGIRequestHandler.server_version = ""
 WSGIRequestHandler.sys_version = ""
 
@@ -18,10 +19,10 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
 
 # =========================
-# CHROMADB SETUP (NO ML)
+# CHROMADB SETUP
 # =========================
-chroma_client = chromadb.Client()
-collection = chroma_client.create_collection(name="security_knowledge")
+chroma_client = chromadb.PersistentClient(path="./chroma_db")
+collection = chroma_client.get_or_create_collection(name="security_knowledge")
 
 documents = [
     "Zero Trust means never trust, always verify.",
@@ -36,11 +37,14 @@ documents = [
     "Network segmentation improves security."
 ]
 
+# Add documents safely (avoid duplicate crash)
+existing = collection.get()["ids"]
 for i, doc in enumerate(documents):
-    collection.add(
-        ids=[str(i)],
-        documents=[doc]
-    )
+    if str(i) not in existing:
+        collection.add(
+            ids=[str(i)],
+            documents=[doc]
+        )
 
 def get_context(query):
     results = collection.query(
@@ -60,7 +64,7 @@ if not GROQ_API_KEY:
 # REDIS CACHE
 # =========================
 try:
-    redis_client = redis.Redis(host='localhost', port=6379, db=0)
+    redis_client = redis.Redis(host='redis', port=6379, db=0)
     redis_client.ping()
     CACHE_ENABLED = True
 except:
@@ -98,6 +102,7 @@ def after_request(response):
 
     elapsed = time.time() - request.start_time
     request_times.append(elapsed)
+
     if len(request_times) > 100:
         request_times.pop(0)
 
@@ -113,7 +118,7 @@ def home():
 @app.route('/health')
 def health():
     uptime = time.time() - start_time
-    avg_response = sum(request_times)/len(request_times) if request_times else 0
+    avg_response = sum(request_times) / len(request_times) if request_times else 0
 
     return jsonify({
         "status": "ok",
@@ -132,7 +137,9 @@ def robots():
 # =========================
 def make_cache_key(data):
     versioned = {"v": "2", "data": data}
-    return hashlib.sha256(json.dumps(versioned, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(versioned, sort_keys=True).encode()
+    ).hexdigest()
 
 # =========================
 # MAIN API
@@ -155,7 +162,6 @@ def recommend():
                 "cached": True
             })
 
-    # Simple context (no ML)
     context = get_context(user_input)
 
     final_prompt = f"""
@@ -230,4 +236,4 @@ Format:
 # RUN
 # =========================
 if __name__ == '__main__':
-    app.run(debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False)
